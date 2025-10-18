@@ -89,8 +89,8 @@ pub extern "C" fn _start() -> ! {
     
     serial_println!("[KERNEL] Spawning demonstration tasks...");
     // Spawn demonstration tasks
-    spawn_task("Task A", task_a);
-    spawn_task("Task B", task_b);
+    spawn_task("Task A", task_a).expect("Failed to spawn Task A");
+    spawn_task("Task B", task_b).expect("Failed to spawn Task B");
     
     serial_println!("[KERNEL] Initializing timer interrupt...");
     // Initialize timer interrupt at 100 Hz (10ms per tick)

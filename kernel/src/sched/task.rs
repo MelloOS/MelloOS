@@ -8,6 +8,22 @@ use super::context::CpuContext;
 /// Task identifier type
 pub type TaskId = usize;
 
+/// Scheduler error types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerError {
+    /// Failed to allocate memory for task stack
+    OutOfMemory,
+    /// Task table is full (maximum tasks reached)
+    TooManyTasks,
+    /// Invalid task ID
+    InvalidTaskId,
+    /// Runqueue is full
+    RunqueueFull,
+}
+
+/// Result type for scheduler operations
+pub type SchedulerResult<T> = Result<T, SchedulerError>;
+
 /// Task state enumeration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskState {
@@ -62,8 +78,8 @@ impl Task {
     /// * `entry_point` - Function pointer to the task's entry point
     /// 
     /// # Returns
-    /// A new Task with Ready state, or panics if stack allocation fails
-    pub fn new(id: TaskId, name: &'static str, entry_point: fn() -> !) -> Self {
+    /// A Result containing the new Task with Ready state, or an error if stack allocation fails
+    pub fn new(id: TaskId, name: &'static str, entry_point: fn() -> !) -> SchedulerResult<Self> {
         use crate::mm::allocator::kmalloc;
         
         // 1. Allocate 8KB stack
@@ -71,7 +87,7 @@ impl Task {
         let stack = kmalloc(STACK_SIZE);
         
         if stack.is_null() {
-            panic!("[SCHED] Failed to allocate stack for task {}", id);
+            return Err(SchedulerError::OutOfMemory);
         }
         
         // 2. Calculate stack top (stack grows downward)
@@ -108,14 +124,14 @@ impl Task {
             r15: 0,
         };
         
-        Self {
+        Ok(Self {
             id,
             name,
             stack,
             stack_size: STACK_SIZE,
             state: TaskState::Ready,
             context,
-        }
+        })
     }
 }
 
@@ -132,25 +148,23 @@ impl Task {
 #[unsafe(naked)]
 #[no_mangle]
 pub extern "C" fn entry_trampoline() -> ! {
-    unsafe {
-        core::arch::naked_asm!(
-            // R12 contains the entry_point function pointer
-            // Call the entry point
-            "call r12",
-            
-            // If we reach here, the task returned (which shouldn't happen)
-            // We need to panic, but we can't call panic directly from naked functions
-            // So we'll call a helper function
-            "call {task_returned_panic}",
-            
-            // Infinite loop as fallback (should never reach here)
-            "2:",
-            "hlt",
-            "jmp 2b",
-            
-            task_returned_panic = sym task_returned_panic,
-        )
-    }
+    core::arch::naked_asm!(
+        // R12 contains the entry_point function pointer
+        // Call the entry point
+        "call r12",
+        
+        // If we reach here, the task returned (which shouldn't happen)
+        // We need to panic, but we can't call panic directly from naked functions
+        // So we'll call a helper function
+        "call {task_returned_panic}",
+        
+        // Infinite loop as fallback (should never reach here)
+        "2:",
+        "hlt",
+        "jmp 2b",
+        
+        task_returned_panic = sym task_returned_panic,
+    )
 }
 
 /// Helper function called when a task returns unexpectedly

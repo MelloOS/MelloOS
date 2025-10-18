@@ -7,8 +7,48 @@ pub mod task;
 pub mod context;
 pub mod timer;
 
+/// Scheduler logging macros with consistent [SCHED] prefix
+/// 
+/// These macros provide different log levels for scheduler operations:
+/// - sched_log!: General information
+/// - sched_info!: Important information
+/// - sched_warn!: Warnings
+/// - sched_error!: Errors
+
+/// Log general scheduler information
+#[macro_export]
+macro_rules! sched_log {
+    ($($arg:tt)*) => {
+        $crate::serial_println!("[SCHED] {}", format_args!($($arg)*))
+    };
+}
+
+/// Log important scheduler information
+#[macro_export]
+macro_rules! sched_info {
+    ($($arg:tt)*) => {
+        $crate::serial_println!("[SCHED] INFO: {}", format_args!($($arg)*))
+    };
+}
+
+/// Log scheduler warnings
+#[macro_export]
+macro_rules! sched_warn {
+    ($($arg:tt)*) => {
+        $crate::serial_println!("[SCHED] WARNING: {}", format_args!($($arg)*))
+    };
+}
+
+/// Log scheduler errors
+#[macro_export]
+macro_rules! sched_error {
+    ($($arg:tt)*) => {
+        $crate::serial_println!("[SCHED] ERROR: {}", format_args!($($arg)*))
+    };
+}
+
 use spin::Mutex;
-use task::{Task, TaskId, TaskState};
+use task::{Task, TaskId, TaskState, SchedulerError, SchedulerResult};
 use context::CpuContext;
 
 /// Maximum number of tasks supported
@@ -145,12 +185,13 @@ static TASK_TABLE: Mutex<[TaskPtr; MAX_TASKS]> = Mutex::new([TaskPtr::null(); MA
 /// * `entry_point` - Function pointer to the task's entry point
 ///
 /// # Returns
-/// The TaskId of the newly spawned task
+/// A Result containing the TaskId of the newly spawned task, or an error if spawning fails
 ///
-/// # Panics
-/// Panics if task creation fails (e.g., out of memory or too many tasks)
-pub fn spawn_task(name: &'static str, entry_point: fn() -> !) -> TaskId {
-    use crate::serial_println;
+/// # Errors
+/// Returns `SchedulerError::TooManyTasks` if the task table is full
+/// Returns `SchedulerError::OutOfMemory` if memory allocation fails
+/// Returns `SchedulerError::RunqueueFull` if the runqueue is full
+pub fn spawn_task(name: &'static str, entry_point: fn() -> !) -> SchedulerResult<TaskId> {
     use crate::mm::allocator::kmalloc;
     use core::ptr;
     
@@ -162,20 +203,28 @@ pub fn spawn_task(name: &'static str, entry_point: fn() -> !) -> TaskId {
     let task_id = sched.next_tid;
     
     if task_id >= MAX_TASKS {
-        panic!("[SCHED] Too many tasks! Maximum is {}", MAX_TASKS);
+        sched_error!("Too many tasks! Maximum is {}", MAX_TASKS);
+        return Err(SchedulerError::TooManyTasks);
     }
     
     sched.next_tid += 1;
     
     // 2. Create new Task
-    let task = Task::new(task_id, name, entry_point);
+    let task = match Task::new(task_id, name, entry_point) {
+        Ok(task) => task,
+        Err(e) => {
+            sched_error!("Failed to create task {}: {:?}", task_id, e);
+            return Err(e);
+        }
+    };
     
     // 3. Allocate Task on heap and add to TASK_TABLE
     let task_size = core::mem::size_of::<Task>();
     let task_ptr = kmalloc(task_size) as *mut Task;
     
     if task_ptr.is_null() {
-        panic!("[SCHED] Failed to allocate memory for task {}", task_id);
+        sched_error!("Failed to allocate memory for task {} ({})", task_id, name);
+        return Err(SchedulerError::OutOfMemory);
     }
     
     unsafe {
@@ -186,13 +235,14 @@ pub fn spawn_task(name: &'static str, entry_point: fn() -> !) -> TaskId {
     
     // 4. Add TaskId to runqueue
     if !sched.runqueue.push_back(task_id) {
-        panic!("[SCHED] Failed to add task {} to runqueue", task_id);
+        sched_error!("Failed to add task {} to runqueue", task_id);
+        return Err(SchedulerError::RunqueueFull);
     }
     
     // 5. Log task spawn
-    serial_println!("[SCHED] Spawned task {}: {}", task_id, name);
+    sched_info!("Spawned task {}: {}", task_id, name);
     
-    task_id
+    Ok(task_id)
 }
 
 /// Get a mutable reference to a task from the task table
@@ -231,7 +281,7 @@ fn get_task(id: TaskId) -> Option<&'static mut Task> {
 /// This function:
 /// 1. Locks SCHED state
 /// 2. Moves current TaskId to back of runqueue (if exists)
-/// 3. Pops front TaskId from runqueue
+/// 3. Pops front TaskId from runqueue (or falls back to idle task if empty)
 /// 4. Updates current TaskId
 /// 5. Unlocks SCHED state
 /// 6. Returns references to old and new tasks for context switch
@@ -254,7 +304,15 @@ fn schedule_next() -> Option<(&'static mut Task, &'static mut Task)> {
     }
     
     // Pop next task from front of runqueue
-    let next_task_id = sched.runqueue.pop_front()?;
+    // If runqueue is empty, fall back to idle task (id 0)
+    let next_task_id = match sched.runqueue.pop_front() {
+        Some(id) => id,
+        None => {
+            // Runqueue is empty - fall back to idle task
+            sched_warn!("Runqueue empty, falling back to idle task");
+            0 // Idle task ID
+        }
+    };
     
     // Update current task
     sched.current = Some(next_task_id);
@@ -294,20 +352,29 @@ pub(crate) static SWITCH_COUNT: core::sync::atomic::AtomicUsize = core::sync::at
 /// - The next task will continue execution from where it was interrupted
 /// - For new tasks, execution starts at entry_trampoline
 pub fn tick() {
-    use crate::serial_println;
     use core::sync::atomic::Ordering;
     
     // Get next task to run
     let tasks = schedule_next();
     
     if let Some((old_task, new_task)) = tasks {
+        // Validate task pointers before context switch
+        if old_task.context.rsp == 0 {
+            panic!("[SCHED] CRITICAL: Old task has invalid RSP (null stack pointer)");
+        }
+        if new_task.context.rsp == 0 {
+            panic!("[SCHED] CRITICAL: New task has invalid RSP (null stack pointer)");
+        }
+        
         // Increment switch counter
         let count = SWITCH_COUNT.fetch_add(1, Ordering::Relaxed);
         
-        // Log context switch (throttled: first 10, then every 100)
+        // Log context switch with throttling
+        // First 10 switches: log every switch
+        // After that: log every 100 switches
         if count < 10 || count % 100 == 0 {
-            serial_println!(
-                "[SCHED] Switch #{} → Task {} ({})",
+            sched_log!(
+                "Switch #{} → Task {} ({})",
                 count,
                 new_task.id,
                 new_task.name
@@ -326,9 +393,8 @@ pub fn tick() {
         // Note: We never reach here because context_switch doesn't return
         // The next task will continue from where it was interrupted
     } else {
-        // No old task (first switch) - just jump to the new task
-        // This case shouldn't happen in normal operation after init
-        // We'll handle it in init_scheduler by setting up the first task properly
+        // No old task (first switch) - this is a critical error
+        panic!("[SCHED] CRITICAL: No tasks available for context switch");
     }
 }
 
@@ -357,11 +423,10 @@ fn idle_task() -> ! {
 /// - The idle task is created but not added to the runqueue
 ///   (it will be used when the runqueue is empty)
 pub fn init_scheduler() {
-    use crate::serial_println;
     use crate::mm::allocator::kmalloc;
     use core::ptr;
     
-    serial_println!("[SCHED] Initializing scheduler...");
+    sched_info!("Initializing scheduler...");
     
     // Initialize SCHED state
     let mut sched = SCHED.lock();
@@ -379,14 +444,19 @@ pub fn init_scheduler() {
     
     // Create idle task (task id 0)
     // We manually create it with id 0 instead of using spawn_task
-    let idle = Task::new(0, "idle", idle_task);
+    let idle = match Task::new(0, "idle", idle_task) {
+        Ok(task) => task,
+        Err(e) => {
+            panic!("[SCHED] CRITICAL: Failed to create idle task: {:?}", e);
+        }
+    };
     
     // Allocate idle task on heap
     let task_size = core::mem::size_of::<Task>();
     let task_ptr = kmalloc(task_size) as *mut Task;
     
     if task_ptr.is_null() {
-        panic!("[SCHED] Failed to allocate memory for idle task");
+        panic!("[SCHED] CRITICAL: Failed to allocate memory for idle task");
     }
     
     unsafe {
@@ -397,8 +467,8 @@ pub fn init_scheduler() {
     task_table[0] = TaskPtr::new(task_ptr);
     drop(task_table);
     
-    serial_println!("[SCHED] Created idle task (id 0)");
-    serial_println!("[SCHED] Scheduler initialized!");
+    sched_info!("Created idle task (id 0)");
+    sched_info!("Scheduler initialized!");
 }
 
 /// End-to-end integration test for task switching
@@ -456,8 +526,8 @@ pub fn test_task_switching_integration() {
     init_scheduler();
     
     serial_println!("[TEST] Spawning test tasks...");
-    spawn_task("Test Task A", test_task_a);
-    spawn_task("Test Task B", test_task_b);
+    spawn_task("Test Task A", test_task_a).expect("Failed to spawn Test Task A");
+    spawn_task("Test Task B", test_task_b).expect("Failed to spawn Test Task B");
     
     serial_println!("[TEST] Initializing timer at 100 Hz...");
     unsafe {
@@ -556,7 +626,7 @@ pub mod manual_tests {
         init_scheduler();
         
         // Spawn a task
-        let task_id = spawn_task("test_task", dummy_task);
+        let task_id = spawn_task("test_task", dummy_task).expect("Failed to spawn test task");
         
         // Verify task was created
         serial_println!("[TEST] Spawned task with id: {}", task_id);
@@ -602,9 +672,9 @@ pub mod manual_tests {
         init_scheduler();
         
         // Spawn three tasks
-        let id_a = spawn_task("task_a", task_a);
-        let id_b = spawn_task("task_b", task_b);
-        let id_c = spawn_task("task_c", task_c);
+        let id_a = spawn_task("task_a", task_a).expect("Failed to spawn task_a");
+        let id_b = spawn_task("task_b", task_b).expect("Failed to spawn task_b");
+        let id_c = spawn_task("task_c", task_c).expect("Failed to spawn task_c");
         
         serial_println!("[TEST] Spawned tasks: {}, {}, {}", id_a, id_b, id_c);
         
@@ -644,8 +714,8 @@ pub mod manual_tests {
         }
         
         // Spawn tasks
-        spawn_task("task_1", task_1);
-        spawn_task("task_2", task_2);
+        spawn_task("task_1", task_1).expect("Failed to spawn task_1");
+        spawn_task("task_2", task_2).expect("Failed to spawn task_2");
         
         // Verify scheduler state
         let sched = SCHED.lock();

@@ -105,15 +105,30 @@ pub unsafe fn init_idt() {
     // Get the code segment selector (0x08 for kernel code segment in most setups)
     let code_selector: u16 = 0x28; // Limine sets up GDT with kernel code at 0x28
     
-    // Set timer interrupt handler at vector 32 (IRQ0 after PIC remapping)
+    // Validate handler address
     let handler_addr = timer_interrupt_handler_wrapper as usize;
+    if handler_addr == 0 {
+        panic!("[TIMER] CRITICAL: Timer interrupt handler address is null");
+    }
+    
+    // Set timer interrupt handler at vector 32 (IRQ0 after PIC remapping)
     IDT.entries[32].set_handler(handler_addr, code_selector);
+    
+    // Validate IDT setup
+    if IDT.entries[32].offset_low == 0 && IDT.entries[32].offset_mid == 0 && IDT.entries[32].offset_high == 0 {
+        panic!("[TIMER] CRITICAL: Failed to set timer interrupt handler in IDT");
+    }
     
     // Create IDT pointer
     let idt_ptr = IdtPointer {
         limit: (core::mem::size_of::<IdtTable>() - 1) as u16,
         base: &raw const IDT as u64,
     };
+    
+    // Validate IDT pointer
+    if idt_ptr.base == 0 {
+        panic!("[TIMER] CRITICAL: IDT base address is null");
+    }
     
     // Load the IDT using lidt instruction
     core::arch::asm!(
@@ -208,16 +223,32 @@ unsafe fn io_wait() {
 /// # Safety
 /// This function is unsafe because it directly manipulates hardware ports.
 /// It must be called after remapping the PIC and setting up the IDT.
+///
+/// # Panics
+/// Panics if the frequency is too low (< 18 Hz) or too high (> 1193182 Hz)
 pub unsafe fn init_pit_timer(frequency: u32) {
     use crate::serial_println;
     
     serial_println!("[TIMER] Configuring PIT for {} Hz...", frequency);
     
+    // Validate frequency range
+    if frequency == 0 {
+        panic!("[TIMER] CRITICAL: Frequency cannot be zero");
+    }
+    
+    if frequency > PIT_FREQUENCY {
+        panic!("[TIMER] CRITICAL: Frequency too high! Maximum is {} Hz", PIT_FREQUENCY);
+    }
+    
     // Calculate divisor for desired frequency
     let divisor = PIT_FREQUENCY / frequency;
     
     if divisor > 65535 {
-        panic!("[TIMER] Frequency too low! Minimum is {} Hz", PIT_FREQUENCY / 65535);
+        panic!("[TIMER] CRITICAL: Frequency too low! Minimum is {} Hz", PIT_FREQUENCY / 65535);
+    }
+    
+    if divisor == 0 {
+        panic!("[TIMER] CRITICAL: Calculated divisor is zero");
     }
     
     let mut command_port = Port::<u8>::new(PIT_COMMAND);
@@ -267,41 +298,39 @@ unsafe fn send_eoi() {
 /// We use a naked function because we're manually managing the IDT.
 #[unsafe(naked)]
 extern "C" fn timer_interrupt_handler_wrapper() {
-    unsafe {
-        core::arch::naked_asm!(
-            // The CPU has already pushed SS, RSP, RFLAGS, CS, RIP
-            // We need to save all other registers
-            
-            "push rax",
-            "push rcx",
-            "push rdx",
-            "push rsi",
-            "push rdi",
-            "push r8",
-            "push r9",
-            "push r10",
-            "push r11",
-            
-            // Call the actual handler
-            "call {handler}",
-            
-            // Restore registers
-            "pop r11",
-            "pop r10",
-            "pop r9",
-            "pop r8",
-            "pop rdi",
-            "pop rsi",
-            "pop rdx",
-            "pop rcx",
-            "pop rax",
-            
-            // Return from interrupt (pops RIP, CS, RFLAGS, RSP, SS)
-            "iretq",
-            
-            handler = sym timer_interrupt_handler,
-        );
-    }
+    core::arch::naked_asm!(
+        // The CPU has already pushed SS, RSP, RFLAGS, CS, RIP
+        // We need to save all other registers
+        
+        "push rax",
+        "push rcx",
+        "push rdx",
+        "push rsi",
+        "push rdi",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        
+        // Call the actual handler
+        "call {handler}",
+        
+        // Restore registers
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rdi",
+        "pop rsi",
+        "pop rdx",
+        "pop rcx",
+        "pop rax",
+        
+        // Return from interrupt (pops RIP, CS, RFLAGS, RSP, SS)
+        "iretq",
+        
+        handler = sym timer_interrupt_handler,
+    )
 }
 
 /// Timer interrupt handler
