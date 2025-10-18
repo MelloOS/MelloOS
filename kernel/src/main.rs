@@ -34,9 +34,13 @@ pub extern "C" fn _start() -> ! {
     // Clear the screen with black color
     fb.clear(0x000000);
     
-    // Display "Hello from my kernel ✨" message
+    // Initialize memory management system
+    // This must be called after framebuffer setup but before any dynamic memory allocation
+    mm::init_memory();
+    
+    // Display "Hello from MelloOS ✨" message
     // White text on black background, positioned at (100, 100)
-    fb.write_string("Hello from my kernel ✨", 100, 100, 0xFFFFFF, 0x000000);
+    fb.write_string("Hello from MelloOS ✨", 100, 100, 0xFFFFFF, 0x000000);
     
     // Infinite loop to prevent kernel from returning
     loop {
