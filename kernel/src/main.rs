@@ -5,6 +5,7 @@ mod panic;
 mod framebuffer;
 mod mm;
 mod serial;
+mod sched;
 
 use limine::request::FramebufferRequest;
 
