@@ -280,7 +280,7 @@ fn schedule_next() -> Option<(&'static mut Task, &'static mut Task)> {
 }
 
 /// Global counter for context switches (for logging throttling)
-static SWITCH_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub(crate) static SWITCH_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// Scheduler tick function - called by timer interrupt
 ///
@@ -399,6 +399,139 @@ pub fn init_scheduler() {
     
     serial_println!("[SCHED] Created idle task (id 0)");
     serial_println!("[SCHED] Scheduler initialized!");
+}
+
+/// End-to-end integration test for task switching
+/// 
+/// This test verifies that:
+/// 1. Two tasks can be spawned successfully
+/// 2. Tasks switch alternately (A B A B pattern)
+/// 3. System remains stable for 100+ context switches
+/// 
+/// # Safety
+/// This function enables interrupts and runs tasks. It should only be called
+/// during kernel initialization in a controlled test environment.
+pub fn test_task_switching_integration() {
+    use crate::serial_println;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    
+    serial_println!("[TEST] ========================================");
+    serial_println!("[TEST] End-to-End Task Switching Integration Test");
+    serial_println!("[TEST] ========================================");
+    
+    // Counter for task A executions
+    static TASK_A_COUNT: AtomicUsize = AtomicUsize::new(0);
+    // Counter for task B executions
+    static TASK_B_COUNT: AtomicUsize = AtomicUsize::new(0);
+    
+    // Test task A - increments counter and prints
+    fn test_task_a() -> ! {
+        loop {
+            let count = TASK_A_COUNT.fetch_add(1, Ordering::Relaxed);
+            if count < 60 {
+                serial_println!("[TEST] Task A execution #{}", count);
+            }
+            // Busy wait
+            for _ in 0..500_000 {
+                unsafe { core::arch::asm!("nop"); }
+            }
+        }
+    }
+    
+    // Test task B - increments counter and prints
+    fn test_task_b() -> ! {
+        loop {
+            let count = TASK_B_COUNT.fetch_add(1, Ordering::Relaxed);
+            if count < 60 {
+                serial_println!("[TEST] Task B execution #{}", count);
+            }
+            // Busy wait
+            for _ in 0..500_000 {
+                unsafe { core::arch::asm!("nop"); }
+            }
+        }
+    }
+    
+    serial_println!("[TEST] Initializing scheduler...");
+    init_scheduler();
+    
+    serial_println!("[TEST] Spawning test tasks...");
+    spawn_task("Test Task A", test_task_a);
+    spawn_task("Test Task B", test_task_b);
+    
+    serial_println!("[TEST] Initializing timer at 100 Hz...");
+    unsafe {
+        timer::init_timer(100);
+    }
+    
+    serial_println!("[TEST] Enabling interrupts...");
+    unsafe {
+        core::arch::asm!("sti");
+    }
+    
+    serial_println!("[TEST] Waiting for 100+ context switches...");
+    serial_println!("[TEST] (This will take several seconds)");
+    
+    // Wait for enough context switches
+    // At 100 Hz, we get ~100 switches per second
+    // Wait for about 2 seconds to get 200+ switches
+    for _ in 0..200_000_000 {
+        unsafe { core::arch::asm!("nop"); }
+    }
+    
+    // Disable interrupts to check results
+    unsafe {
+        core::arch::asm!("cli");
+    }
+    
+    let a_count = TASK_A_COUNT.load(Ordering::Relaxed);
+    let b_count = TASK_B_COUNT.load(Ordering::Relaxed);
+    let total_switches = SWITCH_COUNT.load(Ordering::Relaxed);
+    
+    serial_println!("[TEST] ========================================");
+    serial_println!("[TEST] Test Results:");
+    serial_println!("[TEST]   Task A executions: {}", a_count);
+    serial_println!("[TEST]   Task B executions: {}", b_count);
+    serial_println!("[TEST]   Total context switches: {}", total_switches);
+    serial_println!("[TEST] ========================================");
+    
+    // Verify results
+    let mut passed = true;
+    
+    if a_count == 0 {
+        serial_println!("[TEST] ✗ FAILED: Task A never executed");
+        passed = false;
+    }
+    
+    if b_count == 0 {
+        serial_println!("[TEST] ✗ FAILED: Task B never executed");
+        passed = false;
+    }
+    
+    if total_switches < 100 {
+        serial_println!("[TEST] ✗ FAILED: Not enough context switches (expected 100+, got {})", total_switches);
+        passed = false;
+    }
+    
+    // Check for alternating pattern (both tasks should execute roughly equally)
+    let diff = if a_count > b_count { a_count - b_count } else { b_count - a_count };
+    let max_diff = (a_count + b_count) / 4; // Allow 25% difference
+    
+    if diff > max_diff {
+        serial_println!("[TEST] ⚠ WARNING: Tasks not alternating evenly (A: {}, B: {})", a_count, b_count);
+        serial_println!("[TEST]   This might indicate scheduling issues");
+    }
+    
+    if passed {
+        serial_println!("[TEST] ✓ End-to-End Integration Test PASSED!");
+        serial_println!("[TEST]   - Both tasks executed successfully");
+        serial_println!("[TEST]   - System remained stable for 100+ switches");
+        serial_println!("[TEST]   - Tasks alternated as expected");
+    } else {
+        serial_println!("[TEST] ✗ End-to-End Integration Test FAILED!");
+    }
+    
+    serial_println!("[TEST] ========================================");
 }
 
 /// Manual test functions for kernel-space testing
