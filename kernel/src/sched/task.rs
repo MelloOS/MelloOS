@@ -99,6 +99,11 @@ impl Task {
         let mut rsp = stack_top as *mut u64;
         
         unsafe {
+            // Push entry_point as an argument (will be below the registers)
+            // This will be accessible from entry_trampoline
+            rsp = rsp.offset(-1);
+            *rsp = entry_point as u64;
+            
             // Push entry_trampoline as return address
             rsp = rsp.offset(-1);
             *rsp = entry_trampoline as u64;
@@ -108,7 +113,7 @@ impl Task {
             rsp = rsp.offset(-1); *rsp = 0; // R15
             rsp = rsp.offset(-1); *rsp = 0; // R14
             rsp = rsp.offset(-1); *rsp = 0; // R13
-            rsp = rsp.offset(-1); *rsp = entry_point as u64; // R12 (holds entry_point)
+            rsp = rsp.offset(-1); *rsp = 0; // R12
             rsp = rsp.offset(-1); *rsp = 0; // RBP
             rsp = rsp.offset(-1); *rsp = 0; // RBX
         }
@@ -139,16 +144,30 @@ impl Task {
 /// Entry trampoline for new tasks
 /// 
 /// This function is called when a new task is first scheduled.
-/// It extracts the entry_point from R12 register and calls it.
+/// The entry_point function pointer is on the stack (pushed by Task::new).
 /// If the entry_point ever returns (which it shouldn't), we panic.
 /// 
 /// # Safety
-/// This function uses inline assembly to extract the entry point from R12.
+/// This function uses inline assembly to extract the entry point from the stack.
 /// It must only be called through the context switch mechanism.
 #[unsafe(naked)]
 #[no_mangle]
 pub extern "C" fn entry_trampoline() -> ! {
     core::arch::naked_asm!(
+        // Pop the entry_point from the stack (it was pushed by Task::new)
+        "pop rax",
+        
+        // Save entry_point in a callee-saved register
+        "mov r12, rax",
+        
+        // Enable interrupts before calling the task
+        // (they were disabled during the interrupt handler)
+        "sti",
+        
+        // Align stack to 16 bytes (required by System V ABI)
+        // The stack should be 16-byte aligned before a call instruction
+        "and rsp, -16",
+        
         // R12 contains the entry_point function pointer
         // Call the entry point
         "call r12",

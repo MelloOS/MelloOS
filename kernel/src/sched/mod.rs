@@ -294,6 +294,13 @@ fn schedule_next() -> Option<(&'static mut Task, &'static mut Task)> {
     // Get the current task (if any)
     let old_task_id = sched.current;
     
+    // If there's no current task, this is the first switch
+    // Don't pop from runqueue - let tick() handle it
+    if old_task_id.is_none() {
+        drop(sched);
+        return None;
+    }
+    
     // Move current task to back of runqueue (Round-Robin)
     if let Some(current_id) = old_task_id {
         // Update task state from Running to Ready
@@ -327,12 +334,11 @@ fn schedule_next() -> Option<(&'static mut Task, &'static mut Task)> {
     // Update new task state to Running
     new_task.state = TaskState::Running;
     
-    // Return both tasks (or create a dummy old task if this is the first switch)
+    // Return both tasks
     if let Some(old) = old_task {
         Some((old, new_task))
     } else {
-        // First task switch - no old task
-        // We'll handle this case in tick() by not doing a context switch
+        // Should not reach here since we checked old_task_id.is_none() above
         None
     }
 }
@@ -393,8 +399,54 @@ pub fn tick() {
         // Note: We never reach here because context_switch doesn't return
         // The next task will continue from where it was interrupted
     } else {
-        // No old task (first switch) - this is a critical error
-        panic!("[SCHED] CRITICAL: No tasks available for context switch");
+        // First switch - no old task yet
+        // We need to manually set up the first task and jump to it
+        let mut sched = SCHED.lock();
+        
+        // Pop the first task from runqueue
+        if let Some(first_task_id) = sched.runqueue.pop_front() {
+            sched.current = Some(first_task_id);
+            drop(sched);
+            
+            if let Some(first_task) = get_task(first_task_id) {
+                first_task.state = TaskState::Running;
+                
+                sched_log!("First switch → Task {} ({})", 
+                    first_task.id, first_task.name);
+                
+                // Validate the task's RSP
+                if first_task.context.rsp == 0 {
+                    panic!("[SCHED] CRITICAL: First task has null RSP");
+                }
+                
+                // For the first switch, we need to manually jump to the task
+                // We'll use a dummy context for the "old" task (which is the kernel boot code)
+                // This context will never be used again
+                let mut dummy_context = CpuContext {
+                    r15: 0,
+                    r14: 0,
+                    r13: 0,
+                    r12: 0,
+                    rbp: 0,
+                    rbx: 0,
+                    rsp: 0, // Will be filled by context_switch
+                };
+                
+                unsafe {
+                    context::context_switch(
+                        &mut dummy_context as *mut CpuContext,
+                        &first_task.context as *const CpuContext,
+                    );
+                }
+                
+                // Should never reach here
+                panic!("[SCHED] CRITICAL: Returned from first context switch");
+            } else {
+                panic!("[SCHED] CRITICAL: First task not found in task table");
+            }
+        } else {
+            panic!("[SCHED] CRITICAL: No tasks in runqueue for first switch");
+        }
     }
 }
 
