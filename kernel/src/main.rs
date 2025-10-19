@@ -9,7 +9,7 @@ mod serial;
 mod sched;
 mod sys;
 
-use sched::{init_scheduler, spawn_task};
+use sched::{init_scheduler, spawn_task, priority::TaskPriority};
 
 use limine::request::FramebufferRequest;
 
@@ -89,9 +89,9 @@ pub extern "C" fn _start() -> ! {
     init_scheduler();
     
     serial_println!("[KERNEL] Spawning demonstration tasks...");
-    // Spawn demonstration tasks
-    spawn_task("Task A", task_a).expect("Failed to spawn Task A");
-    spawn_task("Task B", task_b).expect("Failed to spawn Task B");
+    // Spawn demonstration tasks with Normal priority
+    spawn_task("Task A", task_a, TaskPriority::Normal).expect("Failed to spawn Task A");
+    spawn_task("Task B", task_b, TaskPriority::Normal).expect("Failed to spawn Task B");
     
     serial_println!("[KERNEL] Initializing timer interrupt...");
     // Initialize timer interrupt at 100 Hz (10ms per tick)
