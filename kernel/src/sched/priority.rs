@@ -254,3 +254,27 @@ impl PriorityScheduler {
         self.preempt_disable_count == 0
     }
 }
+
+/// Global preemption disable function
+/// 
+/// Disables preemption by incrementing the disable counter.
+/// Must be called before acquiring spinlocks in IPC operations.
+pub fn preempt_disable() {
+    use crate::sched::SCHED;
+    if let Some(sched) = SCHED.get() {
+        let mut sched = sched.lock();
+        sched.priority_sched.preempt_disable();
+    }
+}
+
+/// Global preemption enable function
+/// 
+/// Enables preemption by decrementing the disable counter.
+/// Must be called after releasing spinlocks in IPC operations.
+pub fn preempt_enable() {
+    use crate::sched::SCHED;
+    if let Some(sched) = SCHED.get() {
+        let mut sched = sched.lock();
+        sched.priority_sched.preempt_enable();
+    }
+}

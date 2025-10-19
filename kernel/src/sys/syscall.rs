@@ -248,32 +248,87 @@ fn sys_sleep(ticks: usize) -> isize {
 ///
 /// # Arguments
 /// * `port_id` - Target port ID
-/// * `_buf_ptr` - Pointer to message buffer (unused in Phase 4)
+/// * `buf_ptr` - Pointer to message buffer
 /// * `len` - Length of message
 ///
 /// # Returns
 /// 0 on success, -1 on error
-fn sys_ipc_send(port_id: usize, _buf_ptr: usize, len: usize) -> isize {
+fn sys_ipc_send(port_id: usize, buf_ptr: usize, len: usize) -> isize {
+    use crate::sys::port::PORT_MANAGER;
+    
     serial_println!("[SYSCALL] sys_ipc_send: port={}, len={}", port_id, len);
     
-    // TODO: Implement IPC send
-    // For now, return not implemented
-    -1
+    // Validate buffer pointer and length
+    if buf_ptr == 0 || len == 0 {
+        serial_println!("[SYSCALL] sys_ipc_send: Invalid buffer or length");
+        return -1;
+    }
+    
+    // Phase 4: No pointer validation, assume kernel-accessible
+    // Convert pointer to slice
+    let buffer = unsafe {
+        core::slice::from_raw_parts(buf_ptr as *const u8, len)
+    };
+    
+    // Get PORT_MANAGER and send message
+    let mut port_mgr = PORT_MANAGER.lock();
+    match port_mgr.send_message(port_id, buffer) {
+        Ok(()) => {
+            serial_println!("[SYSCALL] sys_ipc_send: Success");
+            0
+        }
+        Err(e) => {
+            serial_println!("[SYSCALL] sys_ipc_send: Error {:?}", e);
+            -1
+        }
+    }
 }
 
 /// sys_ipc_recv handler - Receive message from port (blocking)
 ///
 /// # Arguments
 /// * `port_id` - Source port ID
-/// * `_buf_ptr` - Pointer to receive buffer (unused in Phase 4)
+/// * `buf_ptr` - Pointer to receive buffer
 /// * `len` - Maximum length to receive
 ///
 /// # Returns
 /// Number of bytes received, or -1 on error
-fn sys_ipc_recv(port_id: usize, _buf_ptr: usize, len: usize) -> isize {
+fn sys_ipc_recv(port_id: usize, buf_ptr: usize, len: usize) -> isize {
+    use crate::sys::port::PORT_MANAGER;
+    
     serial_println!("[SYSCALL] sys_ipc_recv: port={}, max_len={}", port_id, len);
     
-    // TODO: Implement IPC receive
-    // For now, return not implemented
-    -1
+    // Validate buffer pointer and length
+    if buf_ptr == 0 || len == 0 {
+        serial_println!("[SYSCALL] sys_ipc_recv: Invalid buffer or length");
+        return -1;
+    }
+    
+    // Get current task ID
+    let task_id = match crate::sched::get_current_task_info() {
+        Some((id, _)) => id,
+        None => {
+            serial_println!("[SYSCALL] sys_ipc_recv: No current task");
+            return -1;
+        }
+    };
+    
+    // Phase 4: No pointer validation, assume kernel-accessible
+    // Convert pointer to mutable slice
+    let buffer = unsafe {
+        core::slice::from_raw_parts_mut(buf_ptr as *mut u8, len)
+    };
+    
+    // Get PORT_MANAGER and receive message
+    let mut port_mgr = PORT_MANAGER.lock();
+    match port_mgr.recv_message(port_id, task_id, buffer) {
+        Ok(bytes_received) => {
+            serial_println!("[SYSCALL] sys_ipc_recv: Received {} bytes", bytes_received);
+            bytes_received as isize
+        }
+        Err(e) => {
+            serial_println!("[SYSCALL] sys_ipc_recv: Error {:?}", e);
+            -1
+        }
+    }
 }

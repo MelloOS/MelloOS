@@ -492,6 +492,31 @@ pub fn get_current_task_info() -> Option<(TaskId, TaskPriority)> {
     Some((task.id, task.priority))
 }
 
+/// Get task priority by ID
+///
+/// Returns the task's ID and priority, or None if task doesn't exist
+pub fn get_task_priority(task_id: TaskId) -> Option<(TaskId, TaskPriority)> {
+    let task = get_task(task_id)?;
+    Some((task.id, task.priority))
+}
+
+/// Get mutable reference to a task (public version for IPC)
+///
+/// Returns a mutable reference to the task, or None if task doesn't exist
+pub fn get_task_mut(task_id: TaskId) -> Option<&'static mut Task> {
+    get_task(task_id)
+}
+
+/// Enqueue a task to the scheduler
+///
+/// Adds the task to the appropriate priority queue
+pub fn enqueue_task(task_id: TaskId, priority: TaskPriority) {
+    if let Some(sched) = SCHED.get() {
+        let mut sched = sched.lock();
+        sched.priority_sched.enqueue_task(task_id, priority);
+    }
+}
+
 /// Put current task to sleep for specified ticks
 ///
 /// Returns true on success, false on error
