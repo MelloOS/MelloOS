@@ -301,6 +301,10 @@ fn schedule_next() -> Option<(&'static mut Task, &'static mut Task)> {
     // Wake sleeping tasks (they are automatically re-enqueued)
     let woken_count = sched.priority_sched.wake_sleeping_tasks();
     if woken_count > 0 {
+        // Increment wake_count metric
+        use core::sync::atomic::Ordering;
+        crate::sys::METRICS.wake_count.fetch_add(woken_count, Ordering::Relaxed);
+        
         // Update task states for woken tasks
         // Note: We don't have direct access to which tasks were woken,
         // but their state will be updated when they run
@@ -378,6 +382,9 @@ pub(crate) static SWITCH_COUNT: core::sync::atomic::AtomicUsize = core::sync::at
 pub fn tick() {
     use core::sync::atomic::Ordering;
     
+    // Increment timer_ticks metric
+    crate::sys::METRICS.timer_ticks.fetch_add(1, Ordering::Relaxed);
+    
     // Get next task to run
     let tasks = schedule_next();
     
@@ -392,6 +399,14 @@ pub fn tick() {
         
         // Increment switch counter
         let count = SWITCH_COUNT.fetch_add(1, Ordering::Relaxed);
+        
+        // Increment ctx_switches metric
+        crate::sys::METRICS.ctx_switches.fetch_add(1, Ordering::Relaxed);
+        
+        // Check if this is a preemptive switch (old task was still Running/Ready)
+        if old_task.state == TaskState::Running || old_task.state == TaskState::Ready {
+            crate::sys::METRICS.preemptions.fetch_add(1, Ordering::Relaxed);
+        }
         
         // Log context switch with throttling
         // First 10 switches: log every switch

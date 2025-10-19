@@ -129,21 +129,71 @@ pub fn syscall_dispatcher(
     arg2: usize,
     arg3: usize,
 ) -> isize {
+    // Get current task ID for logging
+    let task_id = match crate::sched::get_current_task_info() {
+        Some((id, _)) => id,
+        None => 0, // Unknown task
+    };
+    
+    // Get syscall name for logging
+    let syscall_name = match syscall_id {
+        SYS_WRITE => "SYS_WRITE",
+        SYS_EXIT => "SYS_EXIT",
+        SYS_SLEEP => "SYS_SLEEP",
+        SYS_IPC_SEND => "SYS_IPC_SEND",
+        SYS_IPC_RECV => "SYS_IPC_RECV",
+        _ => "INVALID",
+    };
+    
+    // Log syscall invocation with task ID and syscall name
+    serial_println!(
+        "[SYSCALL] Task {} invoked {} (id={})",
+        task_id,
+        syscall_name,
+        syscall_id
+    );
+    
+    // Log syscall arguments at TRACE level (commented out to avoid spam)
+    // Uncomment for detailed debugging:
+    // serial_println!(
+    //     "[SYSCALL] TRACE: {} args: arg1={:#x}, arg2={:#x}, arg3={:#x}",
+    //     syscall_name, arg1, arg2, arg3
+    // );
+    
     // Increment metrics counter for this syscall
     METRICS.increment_syscall(syscall_id);
     
     // Dispatch to appropriate handler
-    match syscall_id {
+    let result = match syscall_id {
         SYS_WRITE => sys_write(arg1, arg2, arg3),
         SYS_EXIT => sys_exit(arg1),
         SYS_SLEEP => sys_sleep(arg1),
         SYS_IPC_SEND => sys_ipc_send(arg1, arg2, arg3),
         SYS_IPC_RECV => sys_ipc_recv(arg1, arg2, arg3),
         _ => {
-            serial_println!("[SYSCALL] Invalid syscall ID: {}", syscall_id);
+            serial_println!("[SYSCALL] ERROR: Invalid syscall ID: {}", syscall_id);
             -1 // Invalid syscall
         }
+    };
+    
+    // Log syscall return value
+    if result >= 0 {
+        serial_println!(
+            "[SYSCALL] Task {} {} returned: {}",
+            task_id,
+            syscall_name,
+            result
+        );
+    } else {
+        serial_println!(
+            "[SYSCALL] ERROR: Task {} {} failed with error: {}",
+            task_id,
+            syscall_name,
+            result
+        );
     }
+    
+    result
 }
 
 /// sys_write handler - Write data to serial output
@@ -158,7 +208,6 @@ pub fn syscall_dispatcher(
 fn sys_write(fd: usize, buf_ptr: usize, len: usize) -> isize {
     // Validate file descriptor (only stdout supported)
     if fd != 0 {
-        serial_println!("[SYSCALL] sys_write: Invalid fd {}", fd);
         return -1;
     }
     
@@ -191,7 +240,7 @@ fn sys_write(fd: usize, buf_ptr: usize, len: usize) -> isize {
 /// # Returns
 /// Never returns
 fn sys_exit(code: usize) -> ! {
-    serial_println!("[SYSCALL] sys_exit: Task exiting with code {}", code);
+    serial_println!("[SYSCALL] Task exiting with code {}", code);
     
     // TODO: Mark task as terminated and remove from all queues
     // For now, just loop forever
@@ -216,19 +265,15 @@ fn sys_sleep(ticks: usize) -> isize {
     }
     
     // Get current task ID and priority from scheduler
-    let (task_id, priority) = match crate::sched::get_current_task_info() {
+    let (_task_id, priority) = match crate::sched::get_current_task_info() {
         Some(info) => info,
         None => {
-            serial_println!("[SYSCALL] sys_sleep: No current task");
             return -1;
         }
     };
     
-    serial_println!("[SYSCALL] sys_sleep: Task {} sleeping for {} ticks", task_id, ticks);
-    
     // Call scheduler to put task to sleep
     if !crate::sched::sleep_current_task(ticks as u64, priority) {
-        serial_println!("[SYSCALL] sys_sleep: Failed to sleep task");
         return -1;
     }
     
@@ -256,11 +301,8 @@ fn sys_sleep(ticks: usize) -> isize {
 fn sys_ipc_send(port_id: usize, buf_ptr: usize, len: usize) -> isize {
     use crate::sys::port::PORT_MANAGER;
     
-    serial_println!("[SYSCALL] sys_ipc_send: port={}, len={}", port_id, len);
-    
     // Validate buffer pointer and length
     if buf_ptr == 0 || len == 0 {
-        serial_println!("[SYSCALL] sys_ipc_send: Invalid buffer or length");
         return -1;
     }
     
@@ -273,14 +315,8 @@ fn sys_ipc_send(port_id: usize, buf_ptr: usize, len: usize) -> isize {
     // Get PORT_MANAGER and send message
     let mut port_mgr = PORT_MANAGER.lock();
     match port_mgr.send_message(port_id, buffer) {
-        Ok(()) => {
-            serial_println!("[SYSCALL] sys_ipc_send: Success");
-            0
-        }
-        Err(e) => {
-            serial_println!("[SYSCALL] sys_ipc_send: Error {:?}", e);
-            -1
-        }
+        Ok(()) => 0,
+        Err(_e) => -1,
     }
 }
 
@@ -296,11 +332,8 @@ fn sys_ipc_send(port_id: usize, buf_ptr: usize, len: usize) -> isize {
 fn sys_ipc_recv(port_id: usize, buf_ptr: usize, len: usize) -> isize {
     use crate::sys::port::PORT_MANAGER;
     
-    serial_println!("[SYSCALL] sys_ipc_recv: port={}, max_len={}", port_id, len);
-    
     // Validate buffer pointer and length
     if buf_ptr == 0 || len == 0 {
-        serial_println!("[SYSCALL] sys_ipc_recv: Invalid buffer or length");
         return -1;
     }
     
@@ -308,7 +341,6 @@ fn sys_ipc_recv(port_id: usize, buf_ptr: usize, len: usize) -> isize {
     let task_id = match crate::sched::get_current_task_info() {
         Some((id, _)) => id,
         None => {
-            serial_println!("[SYSCALL] sys_ipc_recv: No current task");
             return -1;
         }
     };
@@ -322,13 +354,7 @@ fn sys_ipc_recv(port_id: usize, buf_ptr: usize, len: usize) -> isize {
     // Get PORT_MANAGER and receive message
     let mut port_mgr = PORT_MANAGER.lock();
     match port_mgr.recv_message(port_id, task_id, buffer) {
-        Ok(bytes_received) => {
-            serial_println!("[SYSCALL] sys_ipc_recv: Received {} bytes", bytes_received);
-            bytes_received as isize
-        }
-        Err(e) => {
-            serial_println!("[SYSCALL] sys_ipc_recv: Error {:?}", e);
-            -1
-        }
+        Ok(bytes_received) => bytes_received as isize,
+        Err(_e) => -1,
     }
 }

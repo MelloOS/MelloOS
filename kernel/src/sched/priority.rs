@@ -178,6 +178,8 @@ impl PriorityScheduler {
     /// Put task to sleep for specified ticks
     /// Task will be removed from ready queue and added to sleeping list
     pub fn sleep_task(&mut self, task_id: TaskId, ticks: u64, priority: TaskPriority) -> bool {
+        use crate::serial_println;
+        
         let wake_tick = self.current_tick + ticks;
         
         // Find an empty slot in sleeping_tasks array
@@ -189,6 +191,15 @@ impl PriorityScheduler {
                     priority,
                     valid: true,
                 };
+                
+                // Log sleep operation
+                serial_println!(
+                    "[SCHED] Task {} sleeping for {} ticks (wake at tick {})",
+                    task_id,
+                    ticks,
+                    wake_tick
+                );
+                
                 return true;
             }
         }
@@ -200,6 +211,8 @@ impl PriorityScheduler {
     /// Wake tasks whose sleep time has elapsed
     /// Returns number of tasks woken (for logging)
     pub fn wake_sleeping_tasks(&mut self) -> usize {
+        use crate::serial_println;
+        
         let mut woken_count = 0;
         let current_tick = self.current_tick;
         
@@ -218,10 +231,18 @@ impl PriorityScheduler {
             }
         }
         
-        // Second pass: re-enqueue woken tasks
+        // Second pass: re-enqueue woken tasks and log
         for i in 0..wake_index {
             let (task_id, priority) = tasks_to_wake[i];
             self.enqueue_task(task_id, priority);
+            
+            // Log wake operation
+            serial_println!(
+                "[SCHED] Task {} woke up at tick {} (priority: {:?})",
+                task_id,
+                current_tick,
+                priority
+            );
         }
         
         woken_count
@@ -255,15 +276,30 @@ impl PriorityScheduler {
     }
 }
 
+/// Counter for preemption operations (for throttling logs)
+static PREEMPT_OP_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
 /// Global preemption disable function
 /// 
 /// Disables preemption by incrementing the disable counter.
 /// Must be called before acquiring spinlocks in IPC operations.
 pub fn preempt_disable() {
     use crate::sched::SCHED;
+    use crate::serial_println;
+    use core::sync::atomic::Ordering;
+    
     if let Some(sched) = SCHED.get() {
         let mut sched = sched.lock();
         sched.priority_sched.preempt_disable();
+        
+        // Log preemption disable with throttling (every 100th operation)
+        let count = PREEMPT_OP_COUNT.fetch_add(1, Ordering::Relaxed);
+        if count % 100 == 0 {
+            serial_println!(
+                "[SCHED] Preemption disabled (count: {})",
+                sched.priority_sched.preempt_disable_count
+            );
+        }
     }
 }
 
@@ -273,8 +309,20 @@ pub fn preempt_disable() {
 /// Must be called after releasing spinlocks in IPC operations.
 pub fn preempt_enable() {
     use crate::sched::SCHED;
+    use crate::serial_println;
+    use core::sync::atomic::Ordering;
+    
     if let Some(sched) = SCHED.get() {
         let mut sched = sched.lock();
         sched.priority_sched.preempt_enable();
+        
+        // Log preemption enable with throttling (every 100th operation)
+        let count = PREEMPT_OP_COUNT.load(Ordering::Relaxed);
+        if count % 100 == 0 {
+            serial_println!(
+                "[SCHED] Preemption enabled (count: {})",
+                sched.priority_sched.preempt_disable_count
+            );
+        }
     }
 }
