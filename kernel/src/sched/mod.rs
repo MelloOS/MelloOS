@@ -480,6 +480,56 @@ fn idle_task() -> ! {
     }
 }
 
+/// Get current task ID and priority
+///
+/// Returns the current task's ID and priority, or None if no task is running
+pub fn get_current_task_info() -> Option<(TaskId, TaskPriority)> {
+    let sched = SCHED.get()?.lock();
+    let current_id = sched.current?;
+    drop(sched);
+    
+    let task = get_task(current_id)?;
+    Some((task.id, task.priority))
+}
+
+/// Put current task to sleep for specified ticks
+///
+/// Returns true on success, false on error
+pub fn sleep_current_task(ticks: u64, priority: TaskPriority) -> bool {
+    let mut sched = match SCHED.get() {
+        Some(s) => s.lock(),
+        None => return false,
+    };
+    
+    let current_id = match sched.current {
+        Some(id) => id,
+        None => return false,
+    };
+    
+    // Put task to sleep in priority scheduler
+    if !sched.priority_sched.sleep_task(current_id, ticks, priority) {
+        return false;
+    }
+    
+    // Update task state to Sleeping
+    drop(sched);
+    if let Some(task) = get_task(current_id) {
+        task.state = TaskState::Sleeping;
+    }
+    
+    true
+}
+
+/// Yield CPU to next task (voluntary context switch)
+///
+/// This function triggers the scheduler to select the next task.
+/// It does not return in the traditional sense - execution continues
+/// in the next task, and eventually returns here when this task runs again.
+pub fn yield_now() {
+    // Call the scheduler tick function to perform context switch
+    tick();
+}
+
 /// Initialize the scheduler
 ///
 /// This function:

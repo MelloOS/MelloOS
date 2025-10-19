@@ -46,6 +46,48 @@ fn task_b() -> ! {
     }
 }
 
+/// Test task for syscall interface - demonstrates sys_write and sys_sleep
+fn syscall_test_task() -> ! {
+    // Helper function to invoke syscall
+    unsafe fn syscall(id: usize, arg1: usize, arg2: usize, arg3: usize) -> isize {
+        let ret: isize;
+        core::arch::asm!(
+            "int 0x80",
+            in("rax") id,
+            in("rdi") arg1,
+            in("rsi") arg2,
+            in("rdx") arg3,
+            lateout("rax") ret,
+            options(nostack, preserves_flags)
+        );
+        ret
+    }
+    
+    loop {
+        // Test sys_write (syscall 0)
+        let msg = "Hello from syscall! 🚀\n";
+        let result = unsafe {
+            syscall(0, 0, msg.as_ptr() as usize, msg.len())
+        };
+        serial_println!("[TEST] sys_write returned: {}", result);
+        
+        // Test sys_sleep (syscall 2) - sleep for 50 ticks
+        serial_println!("[TEST] Calling sys_sleep(50)...");
+        let sleep_result = unsafe {
+            syscall(2, 50, 0, 0)
+        };
+        serial_println!("[TEST] sys_sleep returned: {}", sleep_result);
+        serial_println!("[TEST] Woke up from sleep!");
+        
+        // Busy-wait delay
+        for _ in 0..5_000_000 {
+            unsafe {
+                core::arch::asm!("nop");
+            }
+        }
+    }
+}
+
 /// Kernel entry point called by the Limine bootloader
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
@@ -92,6 +134,10 @@ pub extern "C" fn _start() -> ! {
     // Spawn demonstration tasks with Normal priority
     spawn_task("Task A", task_a, TaskPriority::Normal).expect("Failed to spawn Task A");
     spawn_task("Task B", task_b, TaskPriority::Normal).expect("Failed to spawn Task B");
+    
+    serial_println!("[KERNEL] Spawning syscall test task...");
+    // Spawn syscall test task with High priority to test syscall interface
+    spawn_task("Syscall Test", syscall_test_task, TaskPriority::High).expect("Failed to spawn Syscall Test");
     
     serial_println!("[KERNEL] Initializing timer interrupt...");
     // Initialize timer interrupt at 100 Hz (10ms per tick)
