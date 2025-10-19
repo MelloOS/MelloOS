@@ -8,6 +8,7 @@ mod mm;
 mod serial;
 mod sched;
 mod sys;
+mod init_loader;
 
 use sched::{init_scheduler, spawn_task, priority::TaskPriority};
 
@@ -138,6 +139,10 @@ pub extern "C" fn _start() -> ! {
     serial_println!("[KERNEL] Spawning syscall test task...");
     // Spawn syscall test task with High priority to test syscall interface
     spawn_task("Syscall Test", syscall_test_task, TaskPriority::High).expect("Failed to spawn Syscall Test");
+    
+    serial_println!("[KERNEL] Loading init process...");
+    // Load and spawn the userland init process
+    init_loader::load_init_process().expect("Failed to load init process");
     
     serial_println!("[KERNEL] Initializing timer interrupt...");
     // Initialize timer interrupt at 100 Hz (10ms per tick)
