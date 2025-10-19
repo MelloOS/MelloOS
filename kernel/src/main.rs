@@ -7,6 +7,7 @@ mod framebuffer;
 mod mm;
 mod serial;
 mod sched;
+mod sys;
 
 use sched::{init_scheduler, spawn_task};
 

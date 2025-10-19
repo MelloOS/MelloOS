@@ -6,6 +6,7 @@
 pub mod task;
 pub mod context;
 pub mod timer;
+pub mod priority;
 
 /// Scheduler logging macros with consistent [SCHED] prefix
 /// 
