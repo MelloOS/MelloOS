@@ -1,5 +1,55 @@
-/// Priority-based task scheduler
-/// Provides three-level priority scheduling with sleep/wake support
+//! Priority-Based Task Scheduler
+//!
+//! This module implements a three-level priority scheduler with sleep/wake support.
+//! Tasks are organized into separate ready queues based on priority (High, Normal, Low),
+//! and the scheduler always selects the highest priority ready task.
+//!
+//! # Features
+//!
+//! - **Three Priority Levels**: High, Normal, Low
+//! - **O(1) Task Selection**: Using priority bitmap for fast queue lookup
+//! - **Round-Robin within Priority**: Tasks at same priority scheduled fairly
+//! - **Sleep/Wake Mechanism**: Timer-based task suspension
+//! - **Preemption Control**: Critical sections can disable preemption
+//!
+//! # Architecture
+//!
+//! ```text
+//! High Priority Queue:    [Task 5] -> [Task 8] -> NULL
+//! Normal Priority Queue:  [Task 1] -> [Task 2] -> [Task 3] -> NULL
+//! Low Priority Queue:     [Task 4] -> [Task 6] -> NULL
+//!
+//! Sleeping Tasks:
+//! [
+//!     { task_id: 3, wake_tick: 1050, priority: Normal },
+//!     { task_id: 7, wake_tick: 1200, priority: High },
+//! ]
+//! ```
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use crate::sched::priority::{PriorityScheduler, TaskPriority};
+//!
+//! let mut sched = PriorityScheduler::new();
+//!
+//! // Enqueue tasks with different priorities
+//! sched.enqueue_task(1, TaskPriority::Normal);
+//! sched.enqueue_task(2, TaskPriority::High);
+//! sched.enqueue_task(3, TaskPriority::Low);
+//!
+//! // Select next task (will be task 2 - highest priority)
+//! let next = sched.select_next(); // Returns Some(2)
+//!
+//! // Put task to sleep
+//! sched.sleep_task(1, 100, TaskPriority::Normal);
+//!
+//! // Update tick and wake sleeping tasks
+//! for _ in 0..100 {
+//!     sched.tick();
+//! }
+//! sched.wake_sleeping_tasks(); // Task 1 wakes up
+//! ```
 
 use super::task::TaskId;
 
@@ -7,11 +57,30 @@ use super::task::TaskId;
 const MAX_TASKS: usize = 64;
 
 /// Task priority levels
+///
+/// Defines three priority levels for task scheduling. Higher priority tasks
+/// are always selected before lower priority tasks.
+///
+/// # Priority Order
+///
+/// High > Normal > Low
+///
+/// # Usage
+///
+/// ```rust,no_run
+/// use crate::sched::priority::TaskPriority;
+///
+/// let priority = TaskPriority::High;
+/// assert_eq!(priority.as_index(), 2);
+/// ```
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[repr(u8)]
 pub enum TaskPriority {
+    /// Low priority (value 0)
     Low = 0,
+    /// Normal priority (value 1, default)
     Normal = 1,
+    /// High priority (value 2)
     High = 2,
 }
 
@@ -98,6 +167,29 @@ impl SleepingTask {
 }
 
 /// Priority scheduler with three ready queues
+///
+/// Manages task scheduling across three priority levels with sleep/wake support.
+/// Uses a bitmap for O(1) priority queue selection.
+///
+/// # Fields
+///
+/// - **ready_queues**: Three circular queues (one per priority level)
+/// - **non_empty_queues**: Bitmap tracking which queues have tasks (bits 0-2)
+/// - **sleeping_tasks**: Fixed-size array of sleeping tasks
+/// - **current_tick**: Current timer tick count
+/// - **preempt_disable_count**: Counter for preemption control (0 = enabled)
+///
+/// # Performance
+///
+/// - **enqueue_task**: O(1)
+/// - **select_next**: O(1) with bitmap
+/// - **sleep_task**: O(n) to find empty slot
+/// - **wake_sleeping_tasks**: O(n) linear scan
+///
+/// # Future Optimizations
+///
+/// Phase 5 will replace the sleeping_tasks array with a BinaryHeap for O(log n)
+/// wake operations.
 pub struct PriorityScheduler {
     /// Ready queues for each priority level [Low, Normal, High]
     ready_queues: [TaskQueue; 3],
@@ -129,6 +221,13 @@ impl PriorityScheduler {
     }
     
     /// Add task to appropriate priority queue
+    ///
+    /// # Arguments
+    /// * `task_id` - Task identifier
+    /// * `priority` - Task priority level
+    ///
+    /// # Returns
+    /// `true` if task was enqueued successfully, `false` if queue is full
     pub fn enqueue_task(&mut self, task_id: TaskId, priority: TaskPriority) -> bool {
         let index = priority.as_index();
         let success = self.ready_queues[index].push_back(task_id);
@@ -142,7 +241,12 @@ impl PriorityScheduler {
     }
     
     /// Select next task to run (highest priority first)
-    /// Returns None if all queues are empty
+    ///
+    /// Checks queues from highest to lowest priority and returns the first
+    /// available task. Uses bitmap for O(1) queue selection.
+    ///
+    /// # Returns
+    /// `Some(task_id)` if a task is available, `None` if all queues are empty
     pub fn select_next(&mut self) -> Option<TaskId> {
         // Check queues from highest to lowest priority
         // High = 2, Normal = 1, Low = 0
@@ -176,7 +280,17 @@ impl PriorityScheduler {
     }
     
     /// Put task to sleep for specified ticks
-    /// Task will be removed from ready queue and added to sleeping list
+    ///
+    /// Task will be removed from ready queue and added to sleeping list.
+    /// The task will wake up after `ticks` timer interrupts.
+    ///
+    /// # Arguments
+    /// * `task_id` - Task identifier
+    /// * `ticks` - Number of ticks to sleep
+    /// * `priority` - Task priority (for re-enqueuing when woken)
+    ///
+    /// # Returns
+    /// `true` if task was put to sleep successfully, `false` if no slots available
     pub fn sleep_task(&mut self, task_id: TaskId, ticks: u64, priority: TaskPriority) -> bool {
         use crate::serial_println;
         
@@ -209,7 +323,13 @@ impl PriorityScheduler {
     }
     
     /// Wake tasks whose sleep time has elapsed
-    /// Returns number of tasks woken (for logging)
+    ///
+    /// Scans the sleeping tasks array and wakes any tasks whose wake_tick
+    /// is less than or equal to the current tick. Woken tasks are re-enqueued
+    /// to their appropriate priority queue.
+    ///
+    /// # Returns
+    /// Number of tasks woken
     pub fn wake_sleeping_tasks(&mut self) -> usize {
         use crate::serial_println;
         
