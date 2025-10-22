@@ -4,12 +4,18 @@
 
 mod arch;
 mod config;
+mod dev;
 mod framebuffer;
+mod fs;
 mod init_loader;
+mod io;
+mod log;
+mod metrics;
 mod mm;
 mod panic;
 mod sched;
 mod serial;
+mod signal;
 mod sync;
 mod sys;
 mod user;
@@ -841,6 +847,14 @@ pub extern "C" fn _start() -> ! {
     serial_println!("[KERNEL] Initializing IPC subsystem...");
     // Initialize IPC ports
     sys::port::init_ipc();
+
+    serial_println!("[KERNEL] Initializing PTY subsystem...");
+    // Initialize PTY (pseudo-terminal) subsystem
+    dev::pty::init();
+
+    serial_println!("[KERNEL] Initializing /proc filesystem...");
+    // Initialize /proc virtual filesystem
+    fs::proc::init();
 
     serial_println!("[KERNEL] Initializing scheduler...");
     // Initialize the task scheduler

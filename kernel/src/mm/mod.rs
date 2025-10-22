@@ -44,6 +44,8 @@ use spin::Mutex;
 pub mod allocator;
 pub mod paging;
 pub mod pmm;
+pub mod security;
+pub mod tlb;
 
 struct MemoryManagerState {
     pmm: pmm::PhysicalMemoryManager,

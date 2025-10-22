@@ -30,6 +30,7 @@
 
 pub mod context;
 pub mod priority;
+pub mod process_group;
 pub mod task;
 pub mod timer;
 
@@ -571,6 +572,13 @@ pub fn get_task_priority(task_id: TaskId) -> Option<(TaskId, TaskPriority)> {
 /// Returns a mutable reference to the task, or None if task doesn't exist
 pub fn get_task_mut(task_id: TaskId) -> Option<&'static mut Task> {
     get_task(task_id)
+}
+
+/// Get a task by ID (public version for /proc filesystem)
+///
+/// Returns a reference to the task, or None if task doesn't exist
+pub fn get_task_by_id(task_id: TaskId) -> Option<&'static Task> {
+    get_task(task_id).map(|t| &*t)
 }
 
 /// Enqueue a task to a CPU runqueue

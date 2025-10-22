@@ -5,7 +5,10 @@
 
 use super::context::CpuContext;
 use super::priority::TaskPriority;
+use super::process_group::{Pid, Pgid, Sid, DeviceId};
 use crate::mm::paging::PageTableFlags;
+use crate::signal::{SigAction, signals};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Task identifier type
 pub type TaskId = usize;
@@ -118,6 +121,9 @@ pub enum TaskState {
 /// Maximum number of memory regions per task
 const MAX_MEMORY_REGIONS: usize = 16;
 
+/// Maximum number of signals (64 signals, 0-63)
+const MAX_SIGNALS: usize = 64;
+
 /// User space address limit (512GB)
 pub const USER_LIMIT: usize = 0x0000_8000_0000_0000;
 
@@ -159,6 +165,35 @@ pub struct Task {
 
     /// Number of active memory regions
     pub region_count: usize,
+
+    /// Signal handlers for each signal (indexed by signal number)
+    pub signal_handlers: [SigAction; MAX_SIGNALS],
+
+    /// Pending signals bitset (bit N = signal N is pending)
+    /// Uses atomic operations for race-free signal delivery in SMP
+    pub pending_signals: AtomicU64,
+
+    /// Signal mask (bit N = signal N is blocked)
+    /// Uses atomic operations for race-free mask updates
+    pub signal_mask: AtomicU64,
+
+    /// Process ID (same as task ID for now)
+    pub pid: Pid,
+
+    /// Parent process ID
+    pub ppid: Pid,
+
+    /// Process group ID
+    pub pgid: Pgid,
+
+    /// Session ID
+    pub sid: Sid,
+
+    /// Controlling terminal device (if any)
+    pub tty: Option<DeviceId>,
+
+    /// Last syscall number executed (for debugging/panic dumps)
+    pub last_syscall: Option<usize>,
 }
 
 impl Task {
@@ -239,6 +274,9 @@ impl Task {
             r15: 0,
         };
 
+        // Initialize signal handlers with defaults
+        let signal_handlers = Self::init_default_signal_handlers();
+
         Ok(Self {
             id,
             name,
@@ -251,6 +289,15 @@ impl Task {
             blocked_on_port: None,
             memory_regions: [const { None }; MAX_MEMORY_REGIONS],
             region_count: 0,
+            signal_handlers,
+            pending_signals: AtomicU64::new(0),
+            signal_mask: AtomicU64::new(0),
+            pid: id,        // PID = task ID
+            ppid: 0,        // Will be set by parent
+            pgid: id,       // Initially, pgid = pid
+            sid: id,        // Initially, sid = pid (for init process)
+            tty: None,      // No controlling terminal initially
+            last_syscall: None, // No syscall executed yet
         })
     }
 
@@ -404,6 +451,142 @@ impl Task {
             *region = None;
         }
         self.region_count = 0;
+    }
+
+    /// Initialize default signal handlers for a new task
+    ///
+    /// Sets up the default signal actions according to POSIX semantics:
+    /// - Most signals terminate the process
+    /// - Some signals are ignored by default (SIGCHLD, SIGURG, SIGWINCH)
+    /// - Some signals stop the process (SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU)
+    /// - SIGCONT continues a stopped process
+    ///
+    /// # Returns
+    /// Array of SigAction structures with default handlers
+    fn init_default_signal_handlers() -> [SigAction; MAX_SIGNALS] {
+        let mut handlers = [SigAction::default(); MAX_SIGNALS];
+
+        // Set ignored signals
+        handlers[signals::SIGCHLD as usize] = SigAction::ignore();
+        handlers[signals::SIGURG as usize] = SigAction::ignore();
+        handlers[signals::SIGWINCH as usize] = SigAction::ignore();
+
+        // All other signals use default action (handled by kernel)
+        // SIGKILL and SIGSTOP cannot be caught or ignored (enforced elsewhere)
+
+        handlers
+    }
+
+    /// Reset signal handlers to default (used during exec)
+    ///
+    /// After exec, all signal handlers are reset to their default actions,
+    /// except for signals that were set to SIG_IGN which remain ignored.
+    pub fn reset_signal_handlers(&mut self) {
+        for (sig_num, handler) in self.signal_handlers.iter_mut().enumerate() {
+            // Keep ignored signals ignored, reset everything else to default
+            if !matches!(handler.handler, crate::signal::SigHandler::Ignore) {
+                *handler = SigAction::default();
+            }
+        }
+        // Clear pending signals atomically
+        self.pending_signals.store(0, Ordering::Release);
+        // Keep signal mask (inherited across exec)
+    }
+
+    /// Check if a signal is pending and not blocked
+    ///
+    /// # Arguments
+    /// * `signal` - Signal number to check
+    ///
+    /// # Returns
+    /// true if the signal is pending and not blocked
+    pub fn has_pending_signal(&self, signal: u32) -> bool {
+        if signal >= MAX_SIGNALS as u32 {
+            return false;
+        }
+        let mask = 1u64 << signal;
+        let pending = self.pending_signals.load(Ordering::Acquire);
+        let blocked = self.signal_mask.load(Ordering::Acquire);
+        (pending & mask) != 0 && (blocked & mask) == 0
+    }
+
+    /// Get the next pending unblocked signal
+    ///
+    /// # Returns
+    /// Some(signal_number) if there's a pending unblocked signal, None otherwise
+    pub fn next_pending_signal(&self) -> Option<u32> {
+        let pending = self.pending_signals.load(Ordering::Acquire);
+        let blocked = self.signal_mask.load(Ordering::Acquire);
+        let unblocked_pending = pending & !blocked;
+        if unblocked_pending == 0 {
+            return None;
+        }
+        // Find the lowest set bit (lowest signal number)
+        Some(unblocked_pending.trailing_zeros())
+    }
+
+    /// Clear a pending signal (atomically)
+    ///
+    /// # Arguments
+    /// * `signal` - Signal number to clear
+    pub fn clear_pending_signal(&self, signal: u32) {
+        if signal < MAX_SIGNALS as u32 {
+            let mask = 1u64 << signal;
+            // Use fetch_and with inverted mask to clear the bit atomically
+            self.pending_signals.fetch_and(!mask, Ordering::Release);
+        }
+    }
+
+    /// Add a signal to the pending set (atomically)
+    ///
+    /// This is the core function for signal delivery. It uses atomic
+    /// fetch_or to ensure race-free signal delivery in SMP environments.
+    ///
+    /// # Arguments
+    /// * `signal` - Signal number to add
+    ///
+    /// # Returns
+    /// true if the signal was added, false if invalid signal number
+    pub fn add_pending_signal(&self, signal: u32) -> bool {
+        if signal >= MAX_SIGNALS as u32 {
+            return false;
+        }
+        let mask = 1u64 << signal;
+        // Use fetch_or to set the bit atomically
+        self.pending_signals.fetch_or(mask, Ordering::Release);
+        true
+    }
+
+    /// Set signal mask (atomically)
+    ///
+    /// # Arguments
+    /// * `mask` - New signal mask value
+    pub fn set_signal_mask(&self, mask: u64) {
+        self.signal_mask.store(mask, Ordering::Release);
+    }
+
+    /// Get signal mask (atomically)
+    ///
+    /// # Returns
+    /// Current signal mask value
+    pub fn get_signal_mask(&self) -> u64 {
+        self.signal_mask.load(Ordering::Acquire)
+    }
+
+    /// Block signals (add to mask atomically)
+    ///
+    /// # Arguments
+    /// * `mask` - Signals to block (bit N = block signal N)
+    pub fn block_signals(&self, mask: u64) {
+        self.signal_mask.fetch_or(mask, Ordering::Release);
+    }
+
+    /// Unblock signals (remove from mask atomically)
+    ///
+    /// # Arguments
+    /// * `mask` - Signals to unblock (bit N = unblock signal N)
+    pub fn unblock_signals(&self, mask: u64) {
+        self.signal_mask.fetch_and(!mask, Ordering::Release);
     }
 }
 
